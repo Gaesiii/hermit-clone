@@ -26,31 +26,24 @@ PriorityController::PriorityController(TerrariumConfig& config,
 void PriorityController::parseMqttCommand(const JsonDocument& doc) {
 
     // ── Priority 1: User Override ─────────────────────────────────
-    // The mobile app has explicitly commanded specific relay states.
-    // Latch the override flag and apply the device map directly,
-    // bypassing the hysteresis engine entirely.
     if (doc["user_override"].as<bool>() == true) {
         _userOverrideActive = true;
 
         Serial.println(F("[Priority] User override ACTIVE — applying device map."));
 
-        JsonObject devicesObj = doc["devices"].as<JsonObject>();
+        // SỬA Ở ĐÂY: Dùng JsonObjectConst thay vì JsonObject
+        JsonObjectConst devicesObj = doc["devices"].as<JsonObjectConst>();
         _applyDeviceOverride(devicesObj);
 
-        // Note: RelayController::applyState() is NOT called here.
-        // main.cpp owns the GPIO write cycle; it reads _relays after
-        // parseMqttCommand() returns and drives the hardware itself.
-        // This keeps PriorityController free of HAL dependencies.
         return;
     }
 
     // ── Priority 2: Threshold Update (AI agent or Settings screen) ─
-    // user_override == false signals that autonomous control should
-    // resume and/or new threshold values have been sent.
     _userOverrideActive = false;
     Serial.println(F("[Priority] User override CLEARED — resuming hysteresis."));
 
-    JsonObject threshObj = doc["thresholds"].as<JsonObject>();
+    // SỬA Ở ĐÂY: Dùng JsonObjectConst thay vì JsonObject
+    JsonObjectConst threshObj = doc["thresholds"].as<JsonObjectConst>();
     bool changed = _applyThresholdUpdate(threshObj);
 
     if (changed) {
@@ -79,10 +72,7 @@ void PriorityController::clearUserOverride() {
 // ----------------------------------------------------------------
 // Private: _applyDeviceOverride
 // ----------------------------------------------------------------
-void PriorityController::_applyDeviceOverride(const JsonObject& devicesObj) {
-    // Only overwrite a relay field if the key is actually present in
-    // the payload. This enables partial override commands (e.g., the
-    // app sends only "heater": true without touching mist/fan/light).
+void PriorityController::_applyDeviceOverride(JsonObjectConst devicesObj) {
     if (devicesObj["heater"].is<bool>()) {
         _relays.heater = devicesObj["heater"].as<bool>();
         Serial.printf("[Priority]   heater → %s\n",
@@ -108,12 +98,9 @@ void PriorityController::_applyDeviceOverride(const JsonObject& devicesObj) {
 // ----------------------------------------------------------------
 // Private: _applyThresholdUpdate
 // ----------------------------------------------------------------
-bool PriorityController::_applyThresholdUpdate(const JsonObject& threshObj) {
+bool PriorityController::_applyThresholdUpdate(JsonObjectConst threshObj) {
     bool changed = false;
 
-    // Each field is guarded by .is<float>() before reading — this
-    // preserves the original sketch's exact partial-update semantics:
-    // only keys present in the payload mutate the live config.
     if (threshObj["temp_min"].is<float>()) {
         _config.tempMin = threshObj["temp_min"].as<float>();
         Serial.printf("[Priority]   tempMin → %.1f\n", _config.tempMin);

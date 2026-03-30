@@ -155,7 +155,7 @@ private:
      *
      * @param devicesObj  The doc["devices"] JsonObject.
      */
-    void _applyDeviceOverride(const JsonObject& devicesObj);
+    void _applyDeviceOverride(JsonObjectConst devicesObj);
 
     /**
      * @brief Patch threshold values from the "thresholds" sub-object.
@@ -167,5 +167,5 @@ private:
      * @return true if at least one threshold field was updated
      *         (triggers a flash save); false if the object was empty.
      */
-    bool _applyThresholdUpdate(const JsonObject& threshObj);
+    bool _applyThresholdUpdate(JsonObjectConst threshObj);
 };

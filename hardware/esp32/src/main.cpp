@@ -1,32 +1,73 @@
+/**
+ * ================================================================
+ * @file    main.cpp
+ * @brief   Main entry point for the Smart Terrarium Edge Controller.
+ * * This file ties together the modular PlatformIO architecture:
+ * - HAL: Sensors and Relays
+ * - Comms: WiFi and secure MQTT
+ * - Storage: NVS flash memory for configuration
+ * - Logic: Hysteresis automation and User/AI priority queue
+ * ================================================================
+ */
+
 #include <Arduino.h>
 #include "config.h"
+
+// --- Layer Includes ---
 #include "sensors/SensorManager.h"
 #include "actuators/RelayController.h"
 #include "comms/WifiManager.h"
-#include "comms/MqttClientWrapper.h"
+#include "comms/MqttClient.h"
+#include "storage/PrefsStore.h"
+#include "logic/HysteresisEngine.h"
+#include "logic/PriorityController.h"
 
-// --- Global Objects ---
+// ================================================================
+//  GLOBAL SERVICE OBJECTS
+// ================================================================
+SensorManager    sensors;
+RelayController  relays;
 WifiManager      wifi;
-MqttClientWrapper mqtt;
-SensorManager sensors;
-RelayController relays;
+MqttClient       mqtt;
+PrefsStore       store;
+HysteresisEngine hysteresis;
 
-// --- Global State Variables ---
-float g_temperature = NAN;
-float g_humidity    = NAN;
-float g_lux         = 0.0f;
-bool g_userOverride = false; // Will be set by MQTT later
+// ================================================================
+//  GLOBAL STATE DATA
+// ================================================================
+TerrariumConfig g_config;
+RelayState      g_relayState;
 
-// Mock state for relays (Will be managed by Priority/Hysteresis logic later)
-struct RelayState {
-    bool heater = false;
-    bool mist   = false;
-    bool fan    = false;
-    bool light  = false;
-} g_relayState;
+// Inject dependencies into the Priority Controller
+PriorityController priority(g_config, g_relayState, store);
 
-// --- Timers ---
-uint32_t t_lastSensor = 0;
+// ================================================================
+//  STATE TRACKERS & TIMERS
+// ================================================================
+bool g_mqttWasConnected = false;
+uint32_t t_lastSensor   = 0;
+uint32_t t_lastPublish  = 0;
+
+// ================================================================
+//  MQTT CALLBACK
+// ================================================================
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    // ArduinoJson 7 automatically sizes the document
+    JsonDocument doc; 
+    DeserializationError error = deserializeJson(doc, payload, length);
+
+    if (!error) {
+        // 1. Dispatch the payload to the Priority logic
+        priority.parseMqttCommand(doc);
+        
+        // 2. Immediately enforce any relay state changes 
+        // (e.g., instant User Overrides)
+        relays.applyAll(g_relayState);
+    } else {
+        Serial.print(F("[MQTT] JSON parse failed: "));
+        Serial.println(error.c_str());
+    }
+}
 
 // ================================================================
 //  SETUP
@@ -34,49 +75,23 @@ uint32_t t_lastSensor = 0;
 void setup() {
     Serial.begin(115200);
     delay(100);
-    Serial.println("\n[SYSTEM] Booting Smart Terrarium Edge Controller...");
+    Serial.println(F("\n[SYSTEM] Booting Smart Terrarium Edge Controller..."));
 
-    // 1. Initialize Hardware Abstraction Layer (HAL)
+    // 1. Initialize Hardware Abstraction Layer
     relays.init();
     sensors.init();
 
-    Serial.println("[SYSTEM] Hardware initialized. Entering local loop.");
-}
+    // 2. Load thresholds from NVS Flash (Storage Layer)
+    store.loadConfig(g_config);
 
-// ================================================================
-//  LOCAL SURVIVAL LOOP & SENSORS
-// ================================================================
-void loopSensor() {
-    // 1. Read all sensors
-    sensors.readAll();
+    // 3. Initialize Communications Layer
+    wifi.init();
+    
+    // Inject the callback BEFORE initializing the MQTT client
+    mqtt.setCallback(mqttCallback);
+    mqtt.init();
 
-    // 2. Fail-Safe Check (Preserved exact logic)
-    if (sensors.isSensorFault()) {
-        Serial.println("[DANGER] Sensor NaN fault! Executing emergency shutdown.");
-        relays.emergencyShutdownHeatMist(); 
-        return; // Early return prevents applyAll() from executing
-    }
-
-    // 3. Update global state
-    g_temperature = sensors.getTemperature();
-    g_humidity    = sensors.getHumidity();
-    g_lux         = sensors.getLux();
-
-    Serial.printf("[SENSOR] T=%.1f°C  H=%.1f%%  Lux=%.0f\n", g_temperature, g_humidity, g_lux);
-
-    // 4. Temporary Dummy Logic (Until HysteresisEngine is implemented)
-    // If we had the hysteresis engine, it would run here if (!g_userOverride)
-    if (!g_userOverride) {
-        g_relayState.fan = true; // Fan always on for now
-    }
-
-    // 5. Apply states to physical relays
-    relays.applyAll(
-        g_relayState.heater, 
-        g_relayState.mist, 
-        g_relayState.fan, 
-        g_relayState.light
-    );
+    Serial.println(F("[SYSTEM] Boot sequence complete. Entering main loop."));
 }
 
 // ================================================================
@@ -84,12 +99,63 @@ void loopSensor() {
 // ================================================================
 void loop() {
     uint32_t now = millis();
+    bool prevConnected = g_mqttWasConnected;
 
-    // 1-Second Non-Blocking Local Loop
-    if (now - t_lastSensor >= INTERVAL_SENSOR_MS) {
-        t_lastSensor = now;
-        loopSensor();
+    // ----------------------------------------------------------------
+    // 1. MAINTAIN NETWORK (Non-blocking)
+    // ----------------------------------------------------------------
+    mqtt.maintainConnection(g_mqttWasConnected);
+
+    // If the connection just dropped, clear any active user override 
+    // to force the system back into local autonomous survival mode.
+    if (prevConnected && !g_mqttWasConnected) {
+        priority.clearUserOverride();
     }
 
-    // MQTT and WiFi logic will be added here in the next phase
+    // ----------------------------------------------------------------
+    // 2. SENSOR & LOGIC LOOP (1-Second Cadence)
+    // ----------------------------------------------------------------
+    if (now - t_lastSensor >= INTERVAL_SENSOR_MS) {
+        t_lastSensor = now;
+
+        // Read environmental data
+        sensors.readAll();
+
+        // FAIL-SAFE: If DHT22 returns NaN, cut critical actuators
+        if (sensors.isSensorFault()) {
+            relays.emergencyShutdownHeatMist();
+        } 
+        else {
+            // NORMAL OPERATION: If User is NOT overriding, let AI/Local config rule
+            if (!priority.isUserOverrideActive()) {
+                hysteresis.evaluate(
+                    sensors.getTemperature(), 
+                    sensors.getHumidity(), 
+                    sensors.getLux(), 
+                    g_config, 
+                    g_relayState
+                );
+            }
+            // Apply the evaluated or overridden states to the physical GPIOs
+            relays.applyAll(g_relayState);
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // 3. TELEMETRY PUBLISH LOOP (10-Second Cadence)
+    // ----------------------------------------------------------------
+    if (now - t_lastPublish >= INTERVAL_PUBLISH_MS) {
+        t_lastPublish = now;
+
+        if (mqtt.isConnected()) {
+            mqtt.publishTelemetry(
+                sensors.getTemperature(),
+                sensors.getHumidity(),
+                sensors.getLux(),
+                sensors.isSensorFault(),
+                priority.isUserOverrideActive(),
+                g_relayState
+            );
+        }
+    }
 }
