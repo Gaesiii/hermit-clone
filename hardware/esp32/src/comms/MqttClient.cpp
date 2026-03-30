@@ -13,6 +13,7 @@
 // project's include structure (it lives in config.h or a shared
 // types header in the original sketch).
 #include "config.h"
+#include "../actuators/RelayController.h"
 
 // ----------------------------------------------------------------
 // Constructor
@@ -174,7 +175,7 @@ void MqttClient::publishConfirmation(const char* device, bool state) {
 // ----------------------------------------------------------------
 // Public: isConnected
 // ----------------------------------------------------------------
-bool MqttClient::isConnected() const {
+bool MqttClient::isConnected() {
     return _mqttClient.connected();
 }
 

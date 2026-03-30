@@ -134,7 +134,7 @@ public:
     /**
      * @brief Convenience wrapper around PubSubClient::connected().
      */
-    bool isConnected() const;
+    bool isConnected();
 
 private:
     WiFiClientSecure  _espClient;

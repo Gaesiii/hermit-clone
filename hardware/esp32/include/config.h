@@ -46,7 +46,9 @@
 
 // User ID dùng để tạo topic động (terrarium/<type>/<userId>)
 #define USER_ID         "67c6fd9a9acfdbc1d05c22b1"
-
+#define TOPIC_TELEMETRY "terrarium/telemetry/" USER_ID
+#define TOPIC_COMMANDS  "terrarium/commands/" USER_ID
+#define TOPIC_CONFIRM   "terrarium/confirm/" USER_ID
 // ----------------------------------------------------------------
 //  KHOẢNG THỜI GIAN VÒNG LẶP (Intervals — milliseconds)
 // ----------------------------------------------------------------
